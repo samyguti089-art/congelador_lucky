@@ -23,7 +23,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["congelador-lucky-fronted.vercel.app"],  # tu dominio de Vercel
+    allow_origins=["https://congelador-lucky-fronted.vercel.app"],  # tu dominio de Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
