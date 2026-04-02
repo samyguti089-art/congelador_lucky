@@ -21,10 +21,9 @@ supabase = create_client(url, key)
 
 app = FastAPI()
 
-# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # puedes restringir a la URL de tu frontend
+    allow_origins=["congelador-lucky-fronted.vercel.app"],  # tu dominio de Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
