@@ -105,6 +105,62 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
     except Exception as e:
         print("Error en registrar venta:", e)
         raise HTTPException(status_code=500, detail="Error interno en venta")
+# ========== NUEVOS MODELOS ==========
+class ProductoCarrito(BaseModel):
+    producto_id: int
+    cantidad: int
+    total: float          # subtotal del producto (cantidad * precio_unitario)
+
+class VentaCarritoRequest(BaseModel):
+    cajero_id: int
+    productos: List[ProductoCarrito]
+
+# ========== ENDPOINT NUEVO ==========
+@app.post("/venta-carrito")
+def registrar_venta_carrito(venta_data: VentaCarritoRequest):
+    try:
+        # Calcular el total de toda la venta
+        total_venta = sum(p.total for p in venta_data.productos)
+        
+        # 1. Insertar cabecera en ventas_cabecera
+        cabecera = supabase.table("ventas_cabecera").insert({
+            "fecha": datetime.now().isoformat(),
+            "cajero_id": venta_data.cajero_id,
+            "total_venta": total_venta
+        }).execute()
+        
+        # Obtener el ID de la venta recién creada
+        id_venta = cabecera.data[0]["id_venta"]
+        
+        # 2. Insertar cada detalle y restar stock
+        for prod in venta_data.productos:
+            precio_unitario = prod.total / prod.cantidad  # calcular precio unitario
+            # Insertar detalle
+            supabase.table("detalle_ventas").insert({
+                "id_venta": id_venta,
+                "producto_id": prod.producto_id,
+                "cantidad": prod.cantidad,
+                "precio_unitario": precio_unitario,
+                "subtotal": prod.total
+            }).execute()
+            
+            # Restar stock usando tu función RPC existente
+            supabase.rpc("restar_stock", {
+                "p_producto_id": prod.producto_id,
+                "p_cantidad": prod.cantidad
+            }).execute()
+        
+        # 3. (Opcional) Devolver inventario actualizado
+        inventario_actualizado = supabase.table("inventario").select("*").execute()
+        return {
+            "mensaje": "Venta con carrito registrada exitosamente",
+            "id_venta": id_venta,
+            "total": total_venta,
+            "inventario": inventario_actualizado.data
+        }
+    except Exception as e:
+        print("Error en /venta-carrito:", e)
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/ventas/diarias")
 def ventas_diarias():
