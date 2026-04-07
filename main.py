@@ -116,45 +116,45 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
-        # Calcular el total de toda la venta
         total_venta = sum(p.total for p in venta_data.productos)
         
-        # 1. Insertar cabecera en ventas_cabecera
+        # Insertar cabecera
         cabecera = supabase.table("ventas_cabecera").insert({
             "fecha": datetime.now().isoformat(),
             "cajero_id": venta_data.cajero_id,
             "total_venta": total_venta
         }).execute()
         
-        # Obtener el ID de la venta recién creada
         id_venta = cabecera.data[0]["id_venta"]
         
-        # 2. Procesar cada producto/combo en el carrito
+        # Procesar cada producto/combo
         for prod in venta_data.productos:
             if prod.combo_id:
-                # Es un COMBO - obtener los productos del combo
+                # Es un COMBO
                 combo_detalle = supabase.table("combo_detalle").select("*").eq("combo_id", prod.combo_id).execute()
                 
                 for item in combo_detalle.data:
                     producto_id = item["producto_id"]
-                    cantidad_combo = prod.cantidad * item["cantidad"]
+                    # CORREGIDO: La cantidad es la cantidad del combo (prod.cantidad)
+                    # NO se multiplica por item["cantidad"] porque item["cantidad"] es la cantidad de paquetes
+                    cantidad_combo = prod.cantidad
                     
                     # Obtener precio del producto
                     producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
                     if producto.data:
                         precio_unitario = producto.data[0]["precio"]
-                        subtotal = cantidad_combo * precio_unitario
+                        subtotal = cantidad_combo * precio_unitario * item["cantidad"]
                         
                         # Insertar detalle
                         supabase.table("detalle_ventas").insert({
                             "id_venta": id_venta,
                             "producto_id": producto_id,
-                            "cantidad": cantidad_combo,
+                            "cantidad": cantidad_combo * item["cantidad"],
                             "precio_unitario": precio_unitario,
                             "subtotal": subtotal
                         }).execute()
                         
-                        # Restar stock
+                        # CORREGIDO: Restar stock - solo la cantidad del combo (1 paquete)
                         supabase.rpc("restar_stock", {
                             "p_producto_id": producto_id,
                             "p_cantidad": cantidad_combo
@@ -163,7 +163,6 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                 # Es un PRODUCTO NORMAL
                 precio_unitario = prod.total / prod.cantidad
                 
-                # Insertar detalle
                 supabase.table("detalle_ventas").insert({
                     "id_venta": id_venta,
                     "producto_id": prod.producto_id,
@@ -172,43 +171,21 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                     "subtotal": prod.total
                 }).execute()
                 
-                # Restar stock
                 supabase.rpc("restar_stock", {
                     "p_producto_id": prod.producto_id,
                     "p_cantidad": prod.cantidad
                 }).execute()
         
-        # 3. Devolver inventario actualizado
         inventario_actualizado = supabase.table("inventario").select("*").execute()
         return {
-            "mensaje": "Venta con carrito registrada exitosamente",
+            "mensaje": "Venta registrada exitosamente",
             "id_venta": id_venta,
             "total": total_venta,
             "inventario": inventario_actualizado.data
         }
     except Exception as e:
-        print("Error en /venta-carrito:", e)
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-
-@app.get("/ventas/diarias")
-def ventas_diarias():
-    try:
-        result = supabase.rpc("ventas_diarias").execute()
-        print("Ventas diarias:", result)
-        return result.data
-    except Exception as e:
-        print("Error en ventas diarias:", e)
-        raise HTTPException(status_code=500, detail="Error interno en ventas diarias")
-
-@app.get("/ventas/mensuales")
-def ventas_mensuales():
-    try:
-        result = supabase.rpc("ventas_mensuales").execute()
-        print("Ventas mensuales:", result)
-        return result.data
-    except Exception as e:
-        print("Error en ventas mensuales:", e)
-        raise HTTPException(status_code=500, detail="Error interno en ventas mensuales")
+        print("Error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
     
 @app.get("/ventas-dia")
 def ventas_dia(cajero_id: int):
