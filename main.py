@@ -5,10 +5,7 @@ from supabase import create_client
 import os
 from dotenv import load_dotenv
 from datetime import date, datetime
-from typing import List
-
-
-
+from typing import List, Optional
 
 # Cargar variables de entorno
 load_dotenv()
@@ -24,7 +21,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://congelador-lucky-fronted.vercel.app"],  # tu dominio de Vercel
+    allow_origins=["https://congelador-lucky-fronted.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,6 +41,17 @@ class VentaRequest(BaseModel):
     producto_id: int
     cantidad: int
     total: float
+
+# ========== MODELOS PARA CARRITO CON COMBOS ==========
+class ProductoCarrito(BaseModel):
+    producto_id: Optional[int] = None  # Puede ser None si es combo
+    combo_id: Optional[int] = None     # Nuevo campo para combos
+    cantidad: int
+    total: float
+
+class VentaCarritoRequest(BaseModel):
+    cajero_id: int
+    productos: List[ProductoCarrito]
 
 # Endpoints
 @app.post("/login")
@@ -81,7 +89,6 @@ def obtener_inventario():
 @app.post("/venta")
 def registrar_venta(venta: VentaRequest, cajero_id: int):
     try:
-        # Insertar venta con cajero_id
         venta_result = supabase.table("ventas").insert({
             "producto_id": venta.producto_id,
             "cantidad": venta.cantidad,
@@ -91,13 +98,11 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
         }).execute()
         print("Resultado inserción venta:", venta_result)
 
-        # Restar stock con RPC
         supabase.rpc("restar_stock", {
             "p_producto_id": venta.producto_id,
             "p_cantidad": venta.cantidad
         }).execute()
         
-        # Devolver inventario actualizado
         inventario_actualizado = supabase.table("inventario").select("*").execute()
         return {
             "mensaje": "Venta registrada correctamente",
@@ -106,17 +111,8 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
     except Exception as e:
         print("Error en registrar venta:", e)
         raise HTTPException(status_code=500, detail="Error interno en venta")
-# ========== NUEVOS MODELOS ==========
-class ProductoCarrito(BaseModel):
-    producto_id: int
-    cantidad: int
-    total: float          # subtotal del producto (cantidad * precio_unitario)
 
-class VentaCarritoRequest(BaseModel):
-    cajero_id: int
-    productos: List[ProductoCarrito]
-
-# ========== ENDPOINT NUEVO ==========
+# ========== ENDPOINT PARA VENTA CON CARRITO (SOPORTA COMBOS) ==========
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
@@ -133,25 +129,56 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
         # Obtener el ID de la venta recién creada
         id_venta = cabecera.data[0]["id_venta"]
         
-        # 2. Insertar cada detalle y restar stock
+        # 2. Procesar cada producto/combo en el carrito
         for prod in venta_data.productos:
-            precio_unitario = prod.total / prod.cantidad  # calcular precio unitario
-            # Insertar detalle
-            supabase.table("detalle_ventas").insert({
-                "id_venta": id_venta,
-                "producto_id": prod.producto_id,
-                "cantidad": prod.cantidad,
-                "precio_unitario": precio_unitario,
-                "subtotal": prod.total
-            }).execute()
-            
-            # Restar stock usando tu función RPC existente
-            supabase.rpc("restar_stock", {
-                "p_producto_id": prod.producto_id,
-                "p_cantidad": prod.cantidad
-            }).execute()
+            if prod.combo_id:
+                # Es un COMBO - obtener los productos del combo
+                combo_detalle = supabase.table("combo_detalle").select("*").eq("combo_id", prod.combo_id).execute()
+                
+                for item in combo_detalle.data:
+                    producto_id = item["producto_id"]
+                    cantidad_combo = prod.cantidad * item["cantidad"]
+                    
+                    # Obtener precio del producto
+                    producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
+                    if producto.data:
+                        precio_unitario = producto.data[0]["precio"]
+                        subtotal = cantidad_combo * precio_unitario
+                        
+                        # Insertar detalle
+                        supabase.table("detalle_ventas").insert({
+                            "id_venta": id_venta,
+                            "producto_id": producto_id,
+                            "cantidad": cantidad_combo,
+                            "precio_unitario": precio_unitario,
+                            "subtotal": subtotal
+                        }).execute()
+                        
+                        # Restar stock
+                        supabase.rpc("restar_stock", {
+                            "p_producto_id": producto_id,
+                            "p_cantidad": cantidad_combo
+                        }).execute()
+            else:
+                # Es un PRODUCTO NORMAL
+                precio_unitario = prod.total / prod.cantidad
+                
+                # Insertar detalle
+                supabase.table("detalle_ventas").insert({
+                    "id_venta": id_venta,
+                    "producto_id": prod.producto_id,
+                    "cantidad": prod.cantidad,
+                    "precio_unitario": precio_unitario,
+                    "subtotal": prod.total
+                }).execute()
+                
+                # Restar stock
+                supabase.rpc("restar_stock", {
+                    "p_producto_id": prod.producto_id,
+                    "p_cantidad": prod.cantidad
+                }).execute()
         
-        # 3. (Opcional) Devolver inventario actualizado
+        # 3. Devolver inventario actualizado
         inventario_actualizado = supabase.table("inventario").select("*").execute()
         return {
             "mensaje": "Venta con carrito registrada exitosamente",
@@ -209,7 +236,7 @@ def ventas_dia(cajero_id: int):
             resultado.append({
                 "producto": producto_info["nombre"],
                 "cantidad": int(v["cantidad"]),
-                "valor": int(v["cantidad"]) * float(producto_info["precio"])  # 🔹 valor en dinero
+                "valor": int(v["cantidad"]) * float(producto_info["precio"])
             })
 
         return resultado
