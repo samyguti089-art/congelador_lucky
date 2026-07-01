@@ -85,6 +85,18 @@ def obtener_inventario():
     except Exception as e:
         print("Error en inventario:", e)
         raise HTTPException(status_code=500, detail="Error interno en inventario")
+
+@app.get("/ventas/acumuladas")
+def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
+    try:
+        result = supabase.rpc("ventas_acumuladas", {
+            "fecha_inicio": fecha_inicio,
+            "fecha_fin": fecha_fin
+        }).execute()
+        return result.data
+    except Exception as e:
+        print("Error en /ventas/acumuladas:", e)
+        raise HTTPException(status_code=500, detail=str(e))
     
 @app.post("/venta")
 def registrar_venta(venta: VentaRequest, cajero_id: int):
