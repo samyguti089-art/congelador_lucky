@@ -27,12 +27,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Endpoint de prueba
+# ============================================================
+# ENDPOINT DE PRUEBA
+# ============================================================
 @app.get("/")
 def root():
     return {"mensaje": "Backend activo"}
 
-# Modelos
+# ============================================================
+# MODELOS
+# ============================================================
 class LoginRequest(BaseModel):
     nombre: str
     password: str
@@ -42,18 +46,21 @@ class VentaRequest(BaseModel):
     cantidad: int
     total: float
 
-# ========== MODELOS PARA CARRITO CON COMBOS ==========
 class ProductoCarrito(BaseModel):
-    producto_id: Optional[int] = None  # Puede ser None si es combo
-    combo_id: Optional[int] = None     # Nuevo campo para combos
+    producto_id: Optional[int] = None
+    combo_id: Optional[int] = None
     cantidad: int
     total: float
 
 class VentaCarritoRequest(BaseModel):
     cajero_id: int
     productos: List[ProductoCarrito]
+    metodo_pago: str = "efectivo"   # 🆕 Nuevo campo
+    cambio: float = 0.0             # 🆕 Nuevo campo
 
-# Endpoints
+# ============================================================
+# LOGIN
+# ============================================================
 @app.post("/login")
 def login(request: LoginRequest):
     try:
@@ -76,6 +83,9 @@ def login(request: LoginRequest):
         print("Error en login:", e)
         raise HTTPException(status_code=500, detail="Error interno en login")
 
+# ============================================================
+# INVENTARIO
+# ============================================================
 @app.get("/inventario")
 def obtener_inventario():
     try:
@@ -86,6 +96,9 @@ def obtener_inventario():
         print("Error en inventario:", e)
         raise HTTPException(status_code=500, detail="Error interno en inventario")
 
+# ============================================================
+# VENTAS ACUMULADAS (reporte)
+# ============================================================
 @app.get("/ventas/acumuladas")
 def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
     try:
@@ -97,7 +110,10 @@ def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
     except Exception as e:
         print("Error en /ventas/acumuladas:", e)
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+# ============================================================
+# VENTA INDIVIDUAL (legado)
+# ============================================================
 @app.post("/venta")
 def registrar_venta(venta: VentaRequest, cajero_id: int):
     try:
@@ -124,17 +140,21 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
         print("Error en registrar venta:", e)
         raise HTTPException(status_code=500, detail="Error interno en venta")
 
-# ========== ENDPOINT PARA VENTA CON CARRITO (SOPORTA COMBOS) ==========
+# ============================================================
+# VENTA CON CARRITO (soporta combos + método de pago)
+# ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
         total_venta = sum(p.total for p in venta_data.productos)
         
-        # Insertar cabecera
+        # Insertar cabecera con método de pago y cambio
         cabecera = supabase.table("ventas_cabecera").insert({
             "fecha": datetime.now().isoformat(),
             "cajero_id": venta_data.cajero_id,
-            "total_venta": total_venta
+            "total_venta": total_venta,
+            "metodo_pago": venta_data.metodo_pago,   # 🆕
+            "cambio": venta_data.cambio              # 🆕
         }).execute()
         
         id_venta = cabecera.data[0]["id_venta"]
@@ -147,17 +167,13 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                 
                 for item in combo_detalle.data:
                     producto_id = item["producto_id"]
-                    # CORREGIDO: La cantidad es la cantidad del combo (prod.cantidad)
-                    # NO se multiplica por item["cantidad"] porque item["cantidad"] es la cantidad de paquetes
-                    cantidad_combo = prod.cantidad
+                    cantidad_combo = prod.cantidad  # cantidad del combo (1 normalmente)
                     
-                    # Obtener precio del producto
                     producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
                     if producto.data:
                         precio_unitario = producto.data[0]["precio"]
                         subtotal = cantidad_combo * precio_unitario * item["cantidad"]
                         
-                        # Insertar detalle
                         supabase.table("detalle_ventas").insert({
                             "id_venta": id_venta,
                             "producto_id": producto_id,
@@ -166,7 +182,6 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                             "subtotal": subtotal
                         }).execute()
                         
-                        # CORREGIDO: Restar stock - solo la cantidad del combo (1 paquete)
                         supabase.rpc("restar_stock", {
                             "p_producto_id": producto_id,
                             "p_cantidad": cantidad_combo
@@ -196,9 +211,12 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             "inventario": inventario_actualizado.data
         }
     except Exception as e:
-        print("Error:", e)
+        print("Error en /venta-carrito:", e)
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+# ============================================================
+# VENTAS DEL DÍA (por cajero)
+# ============================================================
 @app.get("/ventas-dia")
 def ventas_dia(cajero_id: int):
     try:
