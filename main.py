@@ -55,8 +55,16 @@ class ProductoCarrito(BaseModel):
 class VentaCarritoRequest(BaseModel):
     cajero_id: int
     productos: List[ProductoCarrito]
-    metodo_pago: str = "efectivo"   # 🆕 Nuevo campo
-    cambio: float = 0.0             # 🆕 Nuevo campo
+    metodo_pago: str = "efectivo"   # 🆕
+    cambio: float = 0.0             # 🆕
+
+# ========== MODELOS PARA DESPACHOS (NUEVO) ==========
+class DespachoCreate(BaseModel):
+    producto_id: int
+    cantidad: int
+    fecha: Optional[str] = None  # YYYY-MM-DD
+    observaciones: Optional[str] = None
+    usuario_id: int
 
 # ============================================================
 # LOGIN
@@ -167,7 +175,7 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                 
                 for item in combo_detalle.data:
                     producto_id = item["producto_id"]
-                    cantidad_combo = prod.cantidad  # cantidad del combo (1 normalmente)
+                    cantidad_combo = prod.cantidad
                     
                     producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
                     if producto.data:
@@ -250,3 +258,59 @@ def ventas_dia(cajero_id: int):
     except Exception as e:
         print("Error en ventas-dia:", e)
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
+
+# ============================================================
+# 🆕 DESPACHOS (reabastecimiento diario)
+# ============================================================
+@app.post("/despacho")
+def registrar_despacho(despacho: DespachoCreate):
+    try:
+        fecha = despacho.fecha if despacho.fecha else datetime.now().strftime("%Y-%m-%d")
+        
+        result = supabase.table("despachos").insert({
+            "producto_id": despacho.producto_id,
+            "cantidad": despacho.cantidad,
+            "fecha": fecha,
+            "observaciones": despacho.observaciones,
+            "usuario_id": despacho.usuario_id
+        }).execute()
+        
+        # Actualizar inventario sumando la cantidad despachada
+        supabase.rpc("sumar_stock", {
+            "p_producto_id": despacho.producto_id,
+            "p_cantidad": despacho.cantidad
+        }).execute()
+        
+        return {
+            "mensaje": "Despacho registrado correctamente",
+            "despacho": result.data[0]
+        }
+    except Exception as e:
+        print("Error en /despacho:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/despachos")
+def obtener_despachos(fecha: Optional[str] = None):
+    try:
+        if fecha:
+            query = supabase.table("despachos").select("*").eq("fecha", fecha).order("created_at", desc=True)
+        else:
+            query = supabase.table("despachos").select("*").order("fecha", desc=True).limit(50)
+        
+        result = query.execute()
+        return result.data
+    except Exception as e:
+        print("Error en /despachos:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/despachos/resumen")
+def resumen_despachos(fecha_inicio: str, fecha_fin: str):
+    try:
+        result = supabase.rpc("resumen_despachos", {
+            "fecha_desde": fecha_inicio,
+            "fecha_hasta": fecha_fin
+        }).execute()
+        return result.data
+    except Exception as e:
+        print("Error en /despachos/resumen:", e)
+        raise HTTPException(status_code=500, detail=str(e))
