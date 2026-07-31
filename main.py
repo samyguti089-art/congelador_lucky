@@ -55,16 +55,28 @@ class ProductoCarrito(BaseModel):
 class VentaCarritoRequest(BaseModel):
     cajero_id: int
     productos: List[ProductoCarrito]
-    metodo_pago: str = "efectivo"   # 🆕
-    cambio: float = 0.0             # 🆕
+    metodo_pago: str = "efectivo"
+    cambio: float = 0.0
 
-# ========== MODELOS PARA DESPACHOS (NUEVO) ==========
 class DespachoCreate(BaseModel):
     producto_id: int
     cantidad: int
-    fecha: Optional[str] = None  # YYYY-MM-DD
+    fecha: Optional[str] = None
     observaciones: Optional[str] = None
     usuario_id: int
+
+# ========== NUEVO MODELO PARA CUADRE DE CAJA ==========
+class CuadreCajaCreate(BaseModel):
+    fecha: date
+    cajero_id: int
+    total_ventas_sistema: float
+    total_efectivo_sistema: float
+    total_transferencia_sistema: float
+    efectivo_contado: float
+    transferencia_contada: float
+    diferencia_efectivo: float
+    diferencia_transferencia: float
+    observaciones: Optional[str] = None
 
 # ============================================================
 # LOGIN
@@ -105,7 +117,7 @@ def obtener_inventario():
         raise HTTPException(status_code=500, detail="Error interno en inventario")
 
 # ============================================================
-# VENTAS ACUMULADAS (reporte)
+# VENTAS ACUMULADAS
 # ============================================================
 @app.get("/ventas/acumuladas")
 def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
@@ -149,28 +161,25 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en venta")
 
 # ============================================================
-# VENTA CON CARRITO (soporta combos + método de pago)
+# VENTA CON CARRITO (combos + método de pago)
 # ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
         total_venta = sum(p.total for p in venta_data.productos)
         
-        # Insertar cabecera con método de pago y cambio
         cabecera = supabase.table("ventas_cabecera").insert({
             "fecha": datetime.now().isoformat(),
             "cajero_id": venta_data.cajero_id,
             "total_venta": total_venta,
-            "metodo_pago": venta_data.metodo_pago,   # 🆕
-            "cambio": venta_data.cambio              # 🆕
+            "metodo_pago": venta_data.metodo_pago,
+            "cambio": venta_data.cambio
         }).execute()
         
         id_venta = cabecera.data[0]["id_venta"]
         
-        # Procesar cada producto/combo
         for prod in venta_data.productos:
             if prod.combo_id:
-                # Es un COMBO
                 combo_detalle = supabase.table("combo_detalle").select("*").eq("combo_id", prod.combo_id).execute()
                 
                 for item in combo_detalle.data:
@@ -195,7 +204,6 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                             "p_cantidad": cantidad_combo
                         }).execute()
             else:
-                # Es un PRODUCTO NORMAL
                 precio_unitario = prod.total / prod.cantidad
                 
                 supabase.table("detalle_ventas").insert({
@@ -260,7 +268,7 @@ def ventas_dia(cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
 
 # ============================================================
-# 🆕 DESPACHOS (reabastecimiento diario)
+# DESPACHOS
 # ============================================================
 @app.post("/despacho")
 def registrar_despacho(despacho: DespachoCreate):
@@ -275,7 +283,6 @@ def registrar_despacho(despacho: DespachoCreate):
             "usuario_id": despacho.usuario_id
         }).execute()
         
-        # Actualizar inventario sumando la cantidad despachada
         supabase.rpc("sumar_stock", {
             "p_producto_id": despacho.producto_id,
             "p_cantidad": despacho.cantidad
@@ -313,4 +320,59 @@ def resumen_despachos(fecha_inicio: str, fecha_fin: str):
         return result.data
     except Exception as e:
         print("Error en /despachos/resumen:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# 🆕 CUADRE DE CAJA
+# ============================================================
+@app.post("/cuadre/guardar")
+def guardar_cuadre(cuadre: CuadreCajaCreate):
+    try:
+        # Verificar que el cajero existe
+        usuario = supabase.table("usuarios").select("id").eq("id", cuadre.cajero_id).execute()
+        if not usuario.data:
+            raise HTTPException(status_code=404, detail="Cajero no encontrado")
+
+        result = supabase.table("cuadres_caja").insert({
+            "fecha": cuadre.fecha.isoformat(),
+            "cajero_id": cuadre.cajero_id,
+            "total_ventas_sistema": cuadre.total_ventas_sistema,
+            "total_efectivo_sistema": cuadre.total_efectivo_sistema,
+            "total_transferencia_sistema": cuadre.total_transferencia_sistema,
+            "efectivo_contado": cuadre.efectivo_contado,
+            "transferencia_contada": cuadre.transferencia_contada,
+            "diferencia_efectivo": cuadre.diferencia_efectivo,
+            "diferencia_transferencia": cuadre.diferencia_transferencia,
+            "diferencia": cuadre.diferencia_efectivo + cuadre.diferencia_transferencia,
+            "observaciones": cuadre.observaciones,
+            "estado": "cerrado"
+        }).execute()
+        
+        return {
+            "mensaje": "Cuadre de caja guardado exitosamente",
+            "cuadre": result.data[0]
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print("Error guardando cuadre:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# OBTENER CUADRES (para administrador)
+# ============================================================
+@app.get("/cuadres")
+def obtener_cuadres(fecha_inicio: Optional[str] = None, fecha_fin: Optional[str] = None):
+    try:
+        query = supabase.table("cuadres_caja").select("*").order("fecha", desc=True)
+        
+        if fecha_inicio:
+            query = query.gte("fecha", fecha_inicio)
+        if fecha_fin:
+            query = query.lte("fecha", fecha_fin)
+        
+        result = query.execute()
+        return result.data
+    except Exception as e:
+        print("Error obteniendo cuadres:", e)
         raise HTTPException(status_code=500, detail=str(e))
