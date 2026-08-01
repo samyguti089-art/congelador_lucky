@@ -57,6 +57,8 @@ class VentaCarritoRequest(BaseModel):
     productos: List[ProductoCarrito]
     metodo_pago: str = "efectivo"
     cambio: float = 0.0
+    monto_efectivo: float = 0.0   # 🆕 Nuevo
+    monto_transferencia: float = 0.0  # 🆕 Nuevo
 
 class DespachoCreate(BaseModel):
     producto_id: int
@@ -173,7 +175,9 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             "cajero_id": venta_data.cajero_id,
             "total_venta": total_venta,
             "metodo_pago": venta_data.metodo_pago,
-            "cambio": venta_data.cambio
+            "cambio": venta_data.cambio,
+            "monto_efectivo": venta_data.monto_efectivo or 0,  # 🆕
+            "monto_transferencia": venta_data.monto_transferencia or 0  # 🆕
         }).execute()
         
         id_venta = cabecera.data[0]["id_venta"]
