@@ -57,8 +57,8 @@ class VentaCarritoRequest(BaseModel):
     productos: List[ProductoCarrito]
     metodo_pago: str = "efectivo"
     cambio: float = 0.0
-    monto_efectivo: float = 0.0   # 🆕 Nuevo
-    monto_transferencia: float = 0.0  # 🆕 Nuevo
+    monto_efectivo: float = 0.0
+    monto_transferencia: float = 0.0
 
 class DespachoCreate(BaseModel):
     producto_id: int
@@ -67,7 +67,6 @@ class DespachoCreate(BaseModel):
     observaciones: Optional[str] = None
     usuario_id: int
 
-# ========== NUEVO MODELO PARA CUADRE DE CAJA ==========
 class CuadreCajaCreate(BaseModel):
     fecha: date
     cajero_id: int
@@ -163,7 +162,7 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en venta")
 
 # ============================================================
-# VENTA CON CARRITO (combos + método de pago)
+# VENTA CON CARRITO (combos + método de pago) CORREGIDO
 # ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
@@ -176,38 +175,43 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             "total_venta": total_venta,
             "metodo_pago": venta_data.metodo_pago,
             "cambio": venta_data.cambio,
-            "monto_efectivo": venta_data.monto_efectivo or 0,  # 🆕
-            "monto_transferencia": venta_data.monto_transferencia or 0  # 🆕
+            "monto_efectivo": venta_data.monto_efectivo or 0,
+            "monto_transferencia": venta_data.monto_transferencia or 0
         }).execute()
         
         id_venta = cabecera.data[0]["id_venta"]
         
         for prod in venta_data.productos:
             if prod.combo_id:
+                # Es un COMBO
                 combo_detalle = supabase.table("combo_detalle").select("*").eq("combo_id", prod.combo_id).execute()
                 
                 for item in combo_detalle.data:
                     producto_id = item["producto_id"]
-                    cantidad_combo = prod.cantidad
+                    cantidad_combo = prod.cantidad  # Cantidad de combos vendidos (ej: 1)
                     
                     producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
                     if producto.data:
                         precio_unitario = producto.data[0]["precio"]
-                        subtotal = cantidad_combo * precio_unitario * item["cantidad"]
+                        # 🔥 CALCULAR CANTIDAD REAL A RESTAR
+                        cantidad_real_a_restar = cantidad_combo * item["cantidad"]
+                        subtotal = cantidad_real_a_restar * precio_unitario
                         
                         supabase.table("detalle_ventas").insert({
                             "id_venta": id_venta,
                             "producto_id": producto_id,
-                            "cantidad": cantidad_combo * item["cantidad"],
+                            "cantidad": cantidad_real_a_restar,
                             "precio_unitario": precio_unitario,
                             "subtotal": subtotal
                         }).execute()
                         
+                        # ✅ CORREGIDO: Restar la cantidad real de productos del combo
                         supabase.rpc("restar_stock", {
                             "p_producto_id": producto_id,
-                            "p_cantidad": cantidad_combo
+                            "p_cantidad": cantidad_real_a_restar
                         }).execute()
             else:
+                # Es un PRODUCTO NORMAL
                 precio_unitario = prod.total / prod.cantidad
                 
                 supabase.table("detalle_ventas").insert({
@@ -327,7 +331,7 @@ def resumen_despachos(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# 🆕 CUADRE DE CAJA
+# CUADRE DE CAJA
 # ============================================================
 @app.post("/cuadre/guardar")
 def guardar_cuadre(cuadre: CuadreCajaCreate):
