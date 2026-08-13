@@ -163,76 +163,34 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
 
 # ============================================================
 # VENTA CON CARRITO (combos + método de pago) CORREGIDO
-# ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
-        total_venta = sum(p.total for p in venta_data.productos)
-        
-        cabecera = supabase.table("ventas_cabecera").insert({
-            "fecha": datetime.now().isoformat(),
-            "cajero_id": venta_data.cajero_id,
-            "total_venta": total_venta,
-            "metodo_pago": venta_data.metodo_pago,
-            "cambio": venta_data.cambio,
-            "monto_efectivo": venta_data.monto_efectivo or 0,
-            "monto_transferencia": venta_data.monto_transferencia or 0
+        # Convertir productos a JSONB
+        productos_json = [
+            {
+                "producto_id": p.producto_id,
+                "combo_id": p.combo_id,
+                "cantidad": p.cantidad,
+                "total": p.total
+            }
+            for p in venta_data.productos
+        ]
+
+        result = supabase.rpc("registrar_venta_con_combos", {
+            "p_cajero_id": venta_data.cajero_id,
+            "p_productos": productos_json,
+            "p_metodo_pago": venta_data.metodo_pago,
+            "p_cambio": venta_data.cambio,
+            "p_monto_efectivo": venta_data.monto_efectivo or 0,
+            "p_monto_transferencia": venta_data.monto_transferencia or 0
         }).execute()
-        
-        id_venta = cabecera.data[0]["id_venta"]
-        
-        for prod in venta_data.productos:
-            if prod.combo_id:
-                # Es un COMBO
-                combo_detalle = supabase.table("combo_detalle").select("*").eq("combo_id", prod.combo_id).execute()
-                
-                for item in combo_detalle.data:
-                    producto_id = item["producto_id"]
-                    cantidad_combo = prod.cantidad  # Cantidad de combos vendidos (ej: 1)
-                    
-                    producto = supabase.table("inventario").select("precio").eq("id", producto_id).execute()
-                    if producto.data:
-                        precio_unitario = producto.data[0]["precio"]
-                        # 🔥 CALCULAR CANTIDAD REAL A RESTAR
-                        cantidad_real_a_restar = cantidad_combo * item["cantidad"]
-                        subtotal = cantidad_real_a_restar * precio_unitario
-                        
-                        supabase.table("detalle_ventas").insert({
-                            "id_venta": id_venta,
-                            "producto_id": producto_id,
-                            "cantidad": cantidad_real_a_restar,
-                            "precio_unitario": precio_unitario,
-                            "subtotal": subtotal
-                        }).execute()
-                        
-                        # ✅ CORREGIDO: Restar la cantidad real de productos del combo
-                        supabase.rpc("restar_stock", {
-                            "p_producto_id": producto_id,
-                            "p_cantidad": cantidad_real_a_restar
-                        }).execute()
-            else:
-                # Es un PRODUCTO NORMAL
-                precio_unitario = prod.total / prod.cantidad
-                
-                supabase.table("detalle_ventas").insert({
-                    "id_venta": id_venta,
-                    "producto_id": prod.producto_id,
-                    "cantidad": prod.cantidad,
-                    "precio_unitario": precio_unitario,
-                    "subtotal": prod.total
-                }).execute()
-                
-                supabase.rpc("restar_stock", {
-                    "p_producto_id": prod.producto_id,
-                    "p_cantidad": prod.cantidad
-                }).execute()
-        
-        inventario_actualizado = supabase.table("inventario").select("*").execute()
+
         return {
             "mensaje": "Venta registrada exitosamente",
-            "id_venta": id_venta,
-            "total": total_venta,
-            "inventario": inventario_actualizado.data
+            "id_venta": result.data["id_venta"],
+            "total": result.data["total_venta"],
+            "inventario": supabase.table("inventario").select("*").execute().data
         }
     except Exception as e:
         print("Error en /venta-carrito:", e)
