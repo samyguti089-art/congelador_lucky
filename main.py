@@ -166,7 +166,6 @@ def registrar_venta(venta: VentaRequest, cajero_id: int):
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
-        # Convertir productos a JSONB
         productos_json = [
             {
                 "producto_id": p.producto_id,
