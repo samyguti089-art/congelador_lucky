@@ -51,6 +51,7 @@ class ProductoCarrito(BaseModel):
     combo_id: Optional[int] = None
     cantidad: int
     total: float
+    descripcion: Optional[str] = None  # ✅ nuevo campo opcional
 
 class VentaCarritoRequest(BaseModel):
     cajero_id: int
@@ -171,7 +172,8 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                 "producto_id": p.producto_id,
                 "combo_id": p.combo_id,
                 "cantidad": p.cantidad,
-                "total": p.total
+                "total": p.total,
+                "descripcion": p.descripcion  # ✅ pasamos la descripción
             }
             for p in venta_data.productos
         ]
