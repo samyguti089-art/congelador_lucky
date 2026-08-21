@@ -19,9 +19,18 @@ supabase = create_client(url, key)
 
 app = FastAPI()
 
+# ============================================================
+# CORS
+# ============================================================
+origins = [
+    "https://congelador-lucky-fronted.vercel.app",
+    "http://localhost:5173",   # Ajusta el puerto si usas otro
+    "http://127.0.0.1:5173"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://congelador-lucky-fronted.vercel.app"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,17 +50,12 @@ class LoginRequest(BaseModel):
     nombre: str
     password: str
 
-class VentaRequest(BaseModel):
-    producto_id: int
-    cantidad: int
-    total: float
-
 class ProductoCarrito(BaseModel):
     producto_id: Optional[int] = None
     combo_id: Optional[int] = None
     cantidad: int
     total: float
-    descripcion: Optional[str] = None  # ✅ nuevo campo opcional
+    descripcion: Optional[str] = None
 
 class VentaCarritoRequest(BaseModel):
     cajero_id: int
@@ -134,36 +138,8 @@ def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VENTA INDIVIDUAL (legado)
-# ============================================================
-@app.post("/venta")
-def registrar_venta(venta: VentaRequest, cajero_id: int):
-    try:
-        venta_result = supabase.table("ventas").insert({
-            "producto_id": venta.producto_id,
-            "cantidad": venta.cantidad,
-            "total": venta.total,
-            "fecha": datetime.now().isoformat(),
-            "cajero_id": cajero_id
-        }).execute()
-        print("Resultado inserción venta:", venta_result)
-
-        supabase.rpc("restar_stock", {
-            "p_producto_id": venta.producto_id,
-            "p_cantidad": venta.cantidad
-        }).execute()
-        
-        inventario_actualizado = supabase.table("inventario").select("*").execute()
-        return {
-            "mensaje": "Venta registrada correctamente",
-            "inventario": inventario_actualizado.data
-        }
-    except Exception as e:
-        print("Error en registrar venta:", e)
-        raise HTTPException(status_code=500, detail="Error interno en venta")
-
-# ============================================================
 # VENTA CON CARRITO (combos + método de pago) CORREGIDO
+# ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
     try:
@@ -173,7 +149,7 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
                 "combo_id": p.combo_id,
                 "cantidad": p.cantidad,
                 "total": p.total,
-                "descripcion": p.descripcion  # ✅ pasamos la descripción
+                "descripcion": p.descripcion
             }
             for p in venta_data.productos
         ]
@@ -187,10 +163,15 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             "p_monto_transferencia": venta_data.monto_transferencia or 0
         }).execute()
 
+        # La respuesta de una RPC puede ser una lista o un diccionario
+        data = result.data
+        if isinstance(data, list):
+            data = data[0] if data else {}
+
         return {
             "mensaje": "Venta registrada exitosamente",
-            "id_venta": result.data["id_venta"],
-            "total": result.data["total_venta"],
+            "id_venta": data.get("id_venta"),
+            "total": data.get("total_venta"),
             "inventario": supabase.table("inventario").select("*").execute().data
         }
     except Exception as e:
@@ -207,29 +188,42 @@ def ventas_dia(cajero_id: int):
         inicio_dia = f"{hoy} 00:00:00"
         fin_dia = f"{hoy} 23:59:59"
 
-        ventas = supabase.table("ventas") \
-            .select("producto_id, cantidad, fecha") \
+        # Obtener las cabeceras de venta del cajero en el día
+        cabeceras = supabase.table("ventas_cabecera") \
+            .select("id_venta") \
             .eq("cajero_id", cajero_id) \
             .gte("fecha", inicio_dia) \
             .lte("fecha", fin_dia) \
             .execute()
 
-        if not ventas.data:
+        if not cabeceras.data:
             return []
+
+        ids = [c["id_venta"] for c in cabeceras.data]
+
+        # Obtener los detalles de esas ventas
+        detalles = supabase.table("detalle_ventas") \
+            .select("producto_id, cantidad, subtotal") \
+            .in_("id_venta", ids) \
+            .execute()
 
         inventario = supabase.table("inventario").select("id, nombre, precio").execute()
         mapa_productos = {p["id"]: {"nombre": p["nombre"], "precio": p["precio"]} for p in inventario.data}
 
-        resultado = []
-        for v in ventas.data:
-            producto_info = mapa_productos.get(v["producto_id"], {"nombre": "Desconocido", "precio": 0})
-            resultado.append({
-                "producto": producto_info["nombre"],
-                "cantidad": int(v["cantidad"]),
-                "valor": int(v["cantidad"]) * float(producto_info["precio"])
-            })
+        # Agrupar por producto
+        resumen = {}
+        for d in detalles.data:
+            pid = d["producto_id"]
+            if pid is None:
+                continue  # Los ítems de precio de combo no tienen producto
+            nombre = mapa_productos.get(pid, {"nombre": "Desconocido", "precio": 0})["nombre"]
+            if pid not in resumen:
+                resumen[pid] = {"producto": nombre, "cantidad": 0, "valor": 0.0}
+            resumen[pid]["cantidad"] += int(d["cantidad"])
+            resumen[pid]["valor"] += float(d["subtotal"])
 
-        return resultado
+        return list(resumen.values())
+
     except Exception as e:
         print("Error en ventas-dia:", e)
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
@@ -295,7 +289,6 @@ def resumen_despachos(fecha_inicio: str, fecha_fin: str):
 @app.post("/cuadre/guardar")
 def guardar_cuadre(cuadre: CuadreCajaCreate):
     try:
-        # Verificar que el cajero existe
         usuario = supabase.table("usuarios").select("id").eq("id", cuadre.cajero_id).execute()
         if not usuario.data:
             raise HTTPException(status_code=404, detail="Cajero no encontrado")
