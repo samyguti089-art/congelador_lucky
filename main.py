@@ -93,22 +93,13 @@ class MenudoCreate(BaseModel):
     registrado_por: Optional[int] = None
     observaciones: Optional[str] = None
 
-# ============================================================
-# LOGIN
-# ============================================================
 @app.post("/login")
 def login(request: LoginRequest):
     try:
-        print(f"🔍 Login intento: nombre={request.nombre}")
-        print(f"🔍 SUPABASE_URL en uso: {url[:40] if url else 'NO CONFIGURADA'}...")
-        print(f"🔍 MODO: {MODO}")
-
         result = supabase.rpc("validar_login", {
             "p_nombre": request.nombre,
             "p_password": request.password
         }).execute()
-
-        print(f"🔍 Resultado RPC: {result.data}")
 
         if not result.data or len(result.data) == 0:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
@@ -120,7 +111,6 @@ def login(request: LoginRequest):
             "rol": usuario["rol"]
         }
     except HTTPException as e:
-        # ✅ Propagar el 401 sin convertirlo a 500
         raise e
     except Exception as e:
         print("Error en login:", e)
