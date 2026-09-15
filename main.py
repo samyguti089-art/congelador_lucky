@@ -75,6 +75,7 @@ class DespachoCreate(BaseModel):
 class CuadreCajaCreate(BaseModel):
     fecha: date
     cajero_id: int
+    base: float                                    # ✅ NUEVO - obligatorio
     total_ventas_sistema: float
     total_efectivo_sistema: float
     total_transferencia_sistema: float
@@ -82,6 +83,12 @@ class CuadreCajaCreate(BaseModel):
     transferencia_contada: float
     diferencia_efectivo: float
     diferencia_transferencia: float
+    observaciones: Optional[str] = None
+
+class MenudoCreate(BaseModel):                     # ✅ NUEVO
+    cajero_id: int
+    monto: float
+    registrado_por: Optional[int] = None
     observaciones: Optional[str] = None
 
 # ============================================================
@@ -137,7 +144,7 @@ def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VENTA CON CARRITO (combos + método de pago) CORREGIDO
+# VENTA CON CARRITO (combos + método de pago)
 # ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
@@ -258,7 +265,6 @@ def registrar_despacho(despacho: DespachoCreate):
 def obtener_despachos(fecha: Optional[str] = None):
     try:
         if fecha:
-            # Ordenamos por fecha_cierre descendente para ver los más recientes primero
             query = supabase.table("despachos") \
                 .select("*") \
                 .eq("fecha", fecha) \
@@ -288,7 +294,7 @@ def resumen_despachos(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# CUADRE DE CAJA
+# CUADRE DE CAJA (con base obligatoria)
 # ============================================================
 @app.post("/cuadre/guardar")
 def guardar_cuadre(cuadre: CuadreCajaCreate):
@@ -297,9 +303,14 @@ def guardar_cuadre(cuadre: CuadreCajaCreate):
         if not usuario.data:
             raise HTTPException(status_code=404, detail="Cajero no encontrado")
 
+        # ✅ Validar que la base sea obligatoria
+        if cuadre.base is None or cuadre.base < 0:
+            raise HTTPException(status_code=400, detail="La base del día es obligatoria y debe ser mayor o igual a 0")
+
         result = supabase.table("cuadres_caja").insert({
             "fecha": cuadre.fecha.isoformat(),
             "cajero_id": cuadre.cajero_id,
+            "base": cuadre.base,
             "total_ventas_sistema": cuadre.total_ventas_sistema,
             "total_efectivo_sistema": cuadre.total_efectivo_sistema,
             "total_transferencia_sistema": cuadre.total_transferencia_sistema,
@@ -339,4 +350,74 @@ def obtener_cuadres(fecha_inicio: Optional[str] = None, fecha_fin: Optional[str]
         return result.data
     except Exception as e:
         print("Error obteniendo cuadres:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# MENUDO - Registrar envío adicional
+# ============================================================
+@app.post("/menudo")
+def registrar_menudo(menudo: MenudoCreate):
+    try:
+        if menudo.monto <= 0:
+            raise HTTPException(status_code=400, detail="El monto debe ser mayor a 0")
+
+        result = supabase.table("menudo_registros").insert({
+            "cajero_id": menudo.cajero_id,
+            "monto": menudo.monto,
+            "fecha": date.today().isoformat(),
+            "registrado_por": menudo.registrado_por,
+            "observaciones": menudo.observaciones
+        }).execute()
+
+        return {
+            "mensaje": "Menudo registrado correctamente",
+            "registro": result.data[0]
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print("Error en /menudo:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# BASE DEL DÍA - Obtener base a mostrar en el POS
+# ============================================================
+@app.get("/base-del-dia")
+def obtener_base_del_dia(cajero_id: int):
+    """
+    Retorna:
+      - base_inicial: la base registrada en el último cuadre del cajero (día anterior)
+      - menudo_hoy: suma de menudo enviado hoy
+      - base_total: base_inicial + menudo_hoy
+    """
+    try:
+        # Buscar el último cuadre de este cajero
+        ultimo_cuadre = supabase.table("cuadres_caja") \
+            .select("base, fecha") \
+            .eq("cajero_id", cajero_id) \
+            .order("fecha", desc=True) \
+            .limit(1) \
+            .execute()
+
+        base_inicial = 0
+        if ultimo_cuadre.data:
+            base_inicial = float(ultimo_cuadre.data[0].get("base") or 0)
+
+        # Sumar el menudo enviado hoy a este cajero
+        hoy = date.today().isoformat()
+        menudo_hoy_result = supabase.table("menudo_registros") \
+            .select("monto") \
+            .eq("cajero_id", cajero_id) \
+            .eq("fecha", hoy) \
+            .execute()
+
+        menudo_hoy = sum(float(r["monto"]) for r in (menudo_hoy_result.data or []))
+
+        return {
+            "base_inicial": base_inicial,
+            "menudo_hoy": menudo_hoy,
+            "base_total": base_inicial + menudo_hoy
+        }
+    except Exception as e:
+        print("Error en /base-del-dia:", e)
         raise HTTPException(status_code=500, detail=str(e))
