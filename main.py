@@ -11,6 +11,7 @@ from typing import List, Optional
 load_dotenv()
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
+MODO = os.getenv("MODO", "pos")  # 'pos' o 'fabrica'
 
 if not url or not key:
     raise RuntimeError("SUPABASE_URL o SUPABASE_KEY no están configurados")
@@ -24,6 +25,7 @@ app = FastAPI()
 # ============================================================
 origins = [
     "https://congelador-lucky-fronted.vercel.app",
+    "https://fabrica-congelados.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173"
 ]
@@ -41,7 +43,7 @@ app.add_middleware(
 # ============================================================
 @app.get("/")
 def root():
-    return {"mensaje": "Backend activo"}
+    return {"mensaje": f"Backend activo (modo: {MODO})"}
 
 # ============================================================
 # MODELOS
@@ -75,7 +77,7 @@ class DespachoCreate(BaseModel):
 class CuadreCajaCreate(BaseModel):
     fecha: date
     cajero_id: int
-    base: float                                    # ✅ NUEVO - obligatorio
+    base: float
     total_ventas_sistema: float
     total_efectivo_sistema: float
     total_transferencia_sistema: float
@@ -85,7 +87,7 @@ class CuadreCajaCreate(BaseModel):
     diferencia_transferencia: float
     observaciones: Optional[str] = None
 
-class MenudoCreate(BaseModel):                     # ✅ NUEVO
+class MenudoCreate(BaseModel):
     cajero_id: int
     monto: float
     registrado_por: Optional[int] = None
@@ -101,7 +103,6 @@ def login(request: LoginRequest):
             "p_nombre": request.nombre,
             "p_password": request.password
         }).execute()
-        print("Resultado login:", result)
 
         if not result.data or len(result.data) == 0:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
@@ -144,7 +145,7 @@ def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VENTA CON CARRITO (combos + método de pago)
+# VENTA CON CARRITO (según MODO)
 # ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
@@ -160,7 +161,13 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             for p in venta_data.productos
         ]
 
-        result = supabase.rpc("registrar_venta_con_combos", {
+        # Elegir la función RPC según el modo
+        if MODO == "fabrica":
+            rpc_name = "registrar_venta_sin_inventario"
+        else:
+            rpc_name = "registrar_venta_con_combos"
+
+        result = supabase.rpc(rpc_name, {
             "p_cajero_id": venta_data.cajero_id,
             "p_productos": productos_json,
             "p_metodo_pago": venta_data.metodo_pago,
@@ -231,10 +238,13 @@ def ventas_dia(cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
 
 # ============================================================
-# DESPACHOS (con estado y fecha_cierre)
+# DESPACHOS (solo en modo POS)
 # ============================================================
 @app.post("/despacho")
 def registrar_despacho(despacho: DespachoCreate):
+    if MODO == "fabrica":
+        raise HTTPException(status_code=400, detail="Despachos no disponibles en modo fábrica")
+
     try:
         fecha = despacho.fecha if despacho.fecha else datetime.now().strftime("%Y-%m-%d")
         
@@ -263,6 +273,9 @@ def registrar_despacho(despacho: DespachoCreate):
 
 @app.get("/despachos")
 def obtener_despachos(fecha: Optional[str] = None):
+    if MODO == "fabrica":
+        return []
+
     try:
         if fecha:
             query = supabase.table("despachos") \
@@ -283,6 +296,8 @@ def obtener_despachos(fecha: Optional[str] = None):
 
 @app.get("/despachos/resumen")
 def resumen_despachos(fecha_inicio: str, fecha_fin: str):
+    if MODO == "fabrica":
+        return []
     try:
         result = supabase.rpc("resumen_despachos", {
             "fecha_desde": fecha_inicio,
@@ -294,7 +309,7 @@ def resumen_despachos(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# CUADRE DE CAJA (con base obligatoria)
+# CUADRE DE CAJA
 # ============================================================
 @app.post("/cuadre/guardar")
 def guardar_cuadre(cuadre: CuadreCajaCreate):
@@ -303,7 +318,6 @@ def guardar_cuadre(cuadre: CuadreCajaCreate):
         if not usuario.data:
             raise HTTPException(status_code=404, detail="Cajero no encontrado")
 
-        # ✅ Validar que la base sea obligatoria
         if cuadre.base is None or cuadre.base < 0:
             raise HTTPException(status_code=400, detail="La base del día es obligatoria y debe ser mayor o igual a 0")
 
@@ -334,7 +348,7 @@ def guardar_cuadre(cuadre: CuadreCajaCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# OBTENER CUADRES (para administrador)
+# OBTENER CUADRES
 # ============================================================
 @app.get("/cuadres")
 def obtener_cuadres(fecha_inicio: Optional[str] = None, fecha_fin: Optional[str] = None):
@@ -353,7 +367,7 @@ def obtener_cuadres(fecha_inicio: Optional[str] = None, fecha_fin: Optional[str]
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# MENUDO - Registrar envío adicional
+# MENUDO
 # ============================================================
 @app.post("/menudo")
 def registrar_menudo(menudo: MenudoCreate):
@@ -380,18 +394,11 @@ def registrar_menudo(menudo: MenudoCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# BASE DEL DÍA - Obtener base a mostrar en el POS
+# BASE DEL DÍA
 # ============================================================
 @app.get("/base-del-dia")
 def obtener_base_del_dia(cajero_id: int):
-    """
-    Retorna:
-      - base_inicial: la base registrada en el último cuadre del cajero (día anterior)
-      - menudo_hoy: suma de menudo enviado hoy
-      - base_total: base_inicial + menudo_hoy
-    """
     try:
-        # Buscar el último cuadre de este cajero
         ultimo_cuadre = supabase.table("cuadres_caja") \
             .select("base, fecha") \
             .eq("cajero_id", cajero_id) \
@@ -403,7 +410,6 @@ def obtener_base_del_dia(cajero_id: int):
         if ultimo_cuadre.data:
             base_inicial = float(ultimo_cuadre.data[0].get("base") or 0)
 
-        # Sumar el menudo enviado hoy a este cajero
         hoy = date.today().isoformat()
         menudo_hoy_result = supabase.table("menudo_registros") \
             .select("monto") \
