@@ -24,7 +24,7 @@ app = FastAPI()
 # ============================================================
 origins = [
     "https://congelador-lucky-fronted.vercel.app",
-    "http://localhost:5173",   # Ajusta el puerto si usas otro
+    "http://localhost:5173",
     "http://127.0.0.1:5173"
 ]
 
@@ -116,7 +116,6 @@ def login(request: LoginRequest):
 def obtener_inventario():
     try:
         result = supabase.table("inventario").select("*").execute()
-        print("Inventario:", result)
         return result.data
     except Exception as e:
         print("Error en inventario:", e)
@@ -163,7 +162,6 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             "p_monto_transferencia": venta_data.monto_transferencia or 0
         }).execute()
 
-        # La respuesta de una RPC puede ser una lista o un diccionario
         data = result.data
         if isinstance(data, list):
             data = data[0] if data else {}
@@ -188,7 +186,6 @@ def ventas_dia(cajero_id: int):
         inicio_dia = f"{hoy} 00:00:00"
         fin_dia = f"{hoy} 23:59:59"
 
-        # Obtener las cabeceras de venta del cajero en el día
         cabeceras = supabase.table("ventas_cabecera") \
             .select("id_venta") \
             .eq("cajero_id", cajero_id) \
@@ -201,7 +198,6 @@ def ventas_dia(cajero_id: int):
 
         ids = [c["id_venta"] for c in cabeceras.data]
 
-        # Obtener los detalles de esas ventas
         detalles = supabase.table("detalle_ventas") \
             .select("producto_id, cantidad, subtotal") \
             .in_("id_venta", ids) \
@@ -210,12 +206,11 @@ def ventas_dia(cajero_id: int):
         inventario = supabase.table("inventario").select("id, nombre, precio").execute()
         mapa_productos = {p["id"]: {"nombre": p["nombre"], "precio": p["precio"]} for p in inventario.data}
 
-        # Agrupar por producto
         resumen = {}
         for d in detalles.data:
             pid = d["producto_id"]
             if pid is None:
-                continue  # Los ítems de precio de combo no tienen producto
+                continue
             nombre = mapa_productos.get(pid, {"nombre": "Desconocido", "precio": 0})["nombre"]
             if pid not in resumen:
                 resumen[pid] = {"producto": nombre, "cantidad": 0, "valor": 0.0}
@@ -229,7 +224,7 @@ def ventas_dia(cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
 
 # ============================================================
-# DESPACHOS
+# DESPACHOS (con estado y fecha_cierre)
 # ============================================================
 @app.post("/despacho")
 def registrar_despacho(despacho: DespachoCreate):
@@ -241,7 +236,9 @@ def registrar_despacho(despacho: DespachoCreate):
             "cantidad": despacho.cantidad,
             "fecha": fecha,
             "observaciones": despacho.observaciones,
-            "usuario_id": despacho.usuario_id
+            "usuario_id": despacho.usuario_id,
+            "estado": "cerrado",
+            "fecha_cierre": datetime.now().isoformat()
         }).execute()
         
         supabase.rpc("sumar_stock", {
@@ -261,9 +258,16 @@ def registrar_despacho(despacho: DespachoCreate):
 def obtener_despachos(fecha: Optional[str] = None):
     try:
         if fecha:
-            query = supabase.table("despachos").select("*").eq("fecha", fecha).order("created_at", desc=True)
+            # Ordenamos por fecha_cierre descendente para ver los más recientes primero
+            query = supabase.table("despachos") \
+                .select("*") \
+                .eq("fecha", fecha) \
+                .order("fecha_cierre", desc=True)
         else:
-            query = supabase.table("despachos").select("*").order("fecha", desc=True).limit(50)
+            query = supabase.table("despachos") \
+                .select("*") \
+                .order("fecha", desc=True) \
+                .limit(50)
         
         result = query.execute()
         return result.data
