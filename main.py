@@ -24,8 +24,8 @@ app = FastAPI()
 # CORS
 # ============================================================
 origins = [
-    "https://congelador-lucky-fronted.vercel.app",
-    "https://fabrica-congelados.vercel.app",
+    "https://congelador-lucky-fronted.vercel.app",           # Tienda
+    "https://congelador-lucky-fronted-fabrica.vercel.app",   # Fábrica ✅
     "http://localhost:5173",
     "http://127.0.0.1:5173"
 ]
