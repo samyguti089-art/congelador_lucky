@@ -5,6 +5,7 @@ from supabase import create_client
 import os
 from dotenv import load_dotenv
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 # Cargar variables de entorno
@@ -19,6 +20,19 @@ if not url or not key:
 supabase = create_client(url, key)
 
 app = FastAPI()
+
+# ============================================================
+# ZONA HORARIA DE COLOMBIA (UTC-5)
+# ============================================================
+BOGOTA_TZ = ZoneInfo("America/Bogota")
+
+def fecha_colombia_hoy() -> str:
+    """Devuelve la fecha actual en Colombia (YYYY-MM-DD)."""
+    return datetime.now(BOGOTA_TZ).strftime("%Y-%m-%d")
+
+def ahora_colombia_iso() -> str:
+    """Devuelve fecha y hora actual en Colombia con formato ISO exacto (-05:00)."""
+    return datetime.now(BOGOTA_TZ).isoformat()
 
 # ============================================================
 # CORS
@@ -43,7 +57,11 @@ app.add_middleware(
 # ============================================================
 @app.get("/")
 def root():
-    return {"mensaje": f"Backend activo (modo: {MODO})"}
+    return {
+        "mensaje": f"Backend activo (modo: {MODO})",
+        "fecha_colombia": fecha_colombia_hoy(),
+        "hora_colombia": ahora_colombia_iso()
+    }
 
 # ============================================================
 # MODELOS
@@ -93,6 +111,9 @@ class MenudoCreate(BaseModel):
     registrado_por: Optional[int] = None
     observaciones: Optional[str] = None
 
+# ============================================================
+# AUTENTICACIÓN
+# ============================================================
 @app.post("/login")
 def login(request: LoginRequest):
     try:
@@ -115,6 +136,7 @@ def login(request: LoginRequest):
     except Exception as e:
         print("Error en login:", e)
         raise HTTPException(status_code=500, detail="Error interno en login")
+
 # ============================================================
 # INVENTARIO
 # ============================================================
@@ -159,7 +181,6 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             for p in venta_data.productos
         ]
 
-        # Elegir la función RPC según el modo
         if MODO == "fabrica":
             rpc_name = "registrar_venta_sin_inventario"
         else:
@@ -194,9 +215,9 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
 @app.get("/ventas-dia")
 def ventas_dia(cajero_id: int):
     try:
-        hoy = date.today().strftime("%Y-%m-%d")
-        inicio_dia = f"{hoy} 00:00:00"
-        fin_dia = f"{hoy} 23:59:59"
+        hoy = fecha_colombia_hoy()
+        inicio_dia = f"{hoy}T00:00:00-05:00"
+        fin_dia = f"{hoy}T23:59:59-05:00"
 
         cabeceras = supabase.table("ventas_cabecera") \
             .select("id_venta") \
@@ -244,7 +265,8 @@ def registrar_despacho(despacho: DespachoCreate):
         raise HTTPException(status_code=400, detail="Despachos no disponibles en modo fábrica")
 
     try:
-        fecha = despacho.fecha if despacho.fecha else datetime.now().strftime("%Y-%m-%d")
+        # ✅ Fecha fija de Colombia (evita que pase a mañana después de las 7:00 PM)
+        fecha = despacho.fecha if despacho.fecha else fecha_colombia_hoy()
         
         result = supabase.table("despachos").insert({
             "producto_id": despacho.producto_id,
@@ -253,7 +275,7 @@ def registrar_despacho(despacho: DespachoCreate):
             "observaciones": despacho.observaciones,
             "usuario_id": despacho.usuario_id,
             "estado": "cerrado",
-            "fecha_cierre": datetime.now().isoformat()
+            "fecha_cierre": ahora_colombia_iso()  # ✅ Incluye la zona horaria real -05:00
         }).execute()
         
         supabase.rpc("sumar_stock", {
@@ -376,7 +398,7 @@ def registrar_menudo(menudo: MenudoCreate):
         result = supabase.table("menudo_registros").insert({
             "cajero_id": menudo.cajero_id,
             "monto": menudo.monto,
-            "fecha": date.today().isoformat(),
+            "fecha": fecha_colombia_hoy(),  # ✅ Fecha Colombia
             "registrado_por": menudo.registrado_por,
             "observaciones": menudo.observaciones
         }).execute()
@@ -408,7 +430,7 @@ def obtener_base_del_dia(cajero_id: int):
         if ultimo_cuadre.data:
             base_inicial = float(ultimo_cuadre.data[0].get("base") or 0)
 
-        hoy = date.today().isoformat()
+        hoy = fecha_colombia_hoy()  # ✅ Fecha Colombia
         menudo_hoy_result = supabase.table("menudo_registros") \
             .select("monto") \
             .eq("cajero_id", cajero_id) \
