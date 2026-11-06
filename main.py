@@ -12,7 +12,7 @@ from typing import List, Optional
 load_dotenv()
 url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_KEY")
-MODO = os.getenv("MODO", "pos")  # 'pos' o 'fabrica'
+MODO = os.getenv("MODO", "pos").strip().lower()  # 'pos' o 'fabrica' (ahora Congelados Lucky 3.0)
 
 if not url or not key:
     raise RuntimeError("SUPABASE_URL o SUPABASE_KEY no están configurados")
@@ -35,11 +35,11 @@ def ahora_colombia_iso() -> str:
     return datetime.now(BOGOTA_TZ).isoformat()
 
 # ============================================================
-# CORS
+# CORS (Incluye sede principal, Congelados Lucky 3.0 y subdominios Vercel)
 # ============================================================
 origins = [
-    "https://congelador-lucky-fronted.vercel.app",           # Tienda
-    "https://congelador-lucky-fronted-fabrica.vercel.app",   # Fábrica ✅
+    "https://congelador-lucky-fronted.vercel.app",           # Sede Principal
+    "https://congelador-lucky-fronted-fabrica.vercel.app",   # Congelados Lucky 3.0
     "http://localhost:5173",
     "http://127.0.0.1:5173"
 ]
@@ -47,6 +47,7 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,8 +58,10 @@ app.add_middleware(
 # ============================================================
 @app.get("/")
 def root():
+    sede = "Congelados Lucky 3.0" if MODO in ("fabrica", "lucky3", "lucky_3", "3.0") else "Congelados Lucky"
     return {
-        "mensaje": f"Backend activo (modo: {MODO})",
+        "mensaje": f"Backend activo ({sede} - modo: {MODO})",
+        "sede": sede,
         "fecha_colombia": fecha_colombia_hoy(),
         "hora_colombia": ahora_colombia_iso()
     }
@@ -165,7 +168,7 @@ def obtener_ventas_acumuladas(fecha_inicio: str, fecha_fin: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# VENTA CON CARRITO (según MODO)
+# VENTA CON CARRITO (CON DESCUENTO DE INVENTARIO, COMBOS Y OBSEQUIOS EN AMBAS SEDES)
 # ============================================================
 @app.post("/venta-carrito")
 def registrar_venta_carrito(venta_data: VentaCarritoRequest):
@@ -181,19 +184,26 @@ def registrar_venta_carrito(venta_data: VentaCarritoRequest):
             for p in venta_data.productos
         ]
 
-        if MODO == "fabrica":
-            rpc_name = "registrar_venta_sin_inventario"
-        else:
-            rpc_name = "registrar_venta_con_combos"
-
-        result = supabase.rpc(rpc_name, {
+        rpc_params = {
             "p_cajero_id": venta_data.cajero_id,
             "p_productos": productos_json,
             "p_metodo_pago": venta_data.metodo_pago,
             "p_cambio": venta_data.cambio,
             "p_monto_efectivo": venta_data.monto_efectivo or 0,
             "p_monto_transferencia": venta_data.monto_transferencia or 0
-        }).execute()
+        }
+
+        try:
+            result = supabase.rpc("registrar_venta_con_combos", rpc_params).execute()
+        except Exception as rpc_err:
+            err_str = str(rpc_err)
+            # Respaldo seguro únicamente si en una sede nueva aún no han corrido el SQL de combos/stock
+            if MODO in ("fabrica", "lucky3", "lucky_3", "3.0") and (
+                "registrar_venta_con_combos" in err_str or "PGRST202" in err_str
+            ):
+                result = supabase.rpc("registrar_venta_sin_inventario", rpc_params).execute()
+            else:
+                raise rpc_err
 
         data = result.data
         if isinstance(data, list):
@@ -257,17 +267,14 @@ def ventas_dia(cajero_id: int):
         raise HTTPException(status_code=500, detail="Error interno en ventas-dia")
 
 # ============================================================
-# DESPACHOS (solo en modo POS)
+# DESPACHOS (HABILITADO EN TODAS LAS SEDES: PRINCIPAL Y LUCKY 3.0)
 # ============================================================
 @app.post("/despacho")
 def registrar_despacho(despacho: DespachoCreate):
-    if MODO == "fabrica":
-        raise HTTPException(status_code=400, detail="Despachos no disponibles en modo fábrica")
-
     try:
-        # ✅ Fecha fija de Colombia (evita que pase a mañana después de las 7:00 PM)
+        # Fecha fija de Colombia (evita que pase a mañana después de las 7:00 PM)
         fecha = despacho.fecha if despacho.fecha else fecha_colombia_hoy()
-        
+
         result = supabase.table("despachos").insert({
             "producto_id": despacho.producto_id,
             "cantidad": despacho.cantidad,
@@ -275,14 +282,22 @@ def registrar_despacho(despacho: DespachoCreate):
             "observaciones": despacho.observaciones,
             "usuario_id": despacho.usuario_id,
             "estado": "cerrado",
-            "fecha_cierre": ahora_colombia_iso()  # ✅ Incluye la zona horaria real -05:00
+            "fecha_cierre": ahora_colombia_iso()
         }).execute()
-        
-        supabase.rpc("sumar_stock", {
-            "p_producto_id": despacho.producto_id,
-            "p_cantidad": despacho.cantidad
-        }).execute()
-        
+
+        try:
+            supabase.rpc("sumar_stock", {
+                "p_producto_id": despacho.producto_id,
+                "p_cantidad": despacho.cantidad
+            }).execute()
+        except Exception as stock_err:
+            # Respaldo directo si sumar_stock aún no existe en la BD nueva
+            print("Aviso sumar_stock RPC, aplicando suma directa:", stock_err)
+            prod_actual = supabase.table("inventario").select("cantidad").eq("id", despacho.producto_id).execute()
+            if prod_actual.data:
+                nueva_cant = int(prod_actual.data[0].get("cantidad") or 0) + int(despacho.cantidad)
+                supabase.table("inventario").update({"cantidad": nueva_cant}).eq("id", despacho.producto_id).execute()
+
         return {
             "mensaje": "Despacho registrado correctamente",
             "despacho": result.data[0]
@@ -292,22 +307,30 @@ def registrar_despacho(despacho: DespachoCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/despachos")
-def obtener_despachos(fecha: Optional[str] = None):
-    if MODO == "fabrica":
-        return []
-
+def obtener_despachos(
+    fecha: Optional[str] = None,
+    fecha_inicio: Optional[str] = None,
+    fecha_fin: Optional[str] = None
+):
     try:
         if fecha:
             query = supabase.table("despachos") \
                 .select("*") \
                 .eq("fecha", fecha) \
                 .order("fecha_cierre", desc=True)
+        elif fecha_inicio or fecha_fin:
+            query = supabase.table("despachos").select("*")
+            if fecha_inicio:
+                query = query.gte("fecha", fecha_inicio)
+            if fecha_fin:
+                query = query.lte("fecha", fecha_fin)
+            query = query.order("fecha", desc=False)
         else:
             query = supabase.table("despachos") \
                 .select("*") \
                 .order("fecha", desc=True) \
-                .limit(50)
-        
+                .limit(100)
+
         result = query.execute()
         return result.data
     except Exception as e:
@@ -316,8 +339,6 @@ def obtener_despachos(fecha: Optional[str] = None):
 
 @app.get("/despachos/resumen")
 def resumen_despachos(fecha_inicio: str, fecha_fin: str):
-    if MODO == "fabrica":
-        return []
     try:
         result = supabase.rpc("resumen_despachos", {
             "fecha_desde": fecha_inicio,
@@ -356,7 +377,7 @@ def guardar_cuadre(cuadre: CuadreCajaCreate):
             "observaciones": cuadre.observaciones,
             "estado": "cerrado"
         }).execute()
-        
+
         return {
             "mensaje": "Cuadre de caja guardado exitosamente",
             "cuadre": result.data[0]
@@ -374,12 +395,12 @@ def guardar_cuadre(cuadre: CuadreCajaCreate):
 def obtener_cuadres(fecha_inicio: Optional[str] = None, fecha_fin: Optional[str] = None):
     try:
         query = supabase.table("cuadres_caja").select("*").order("fecha", desc=True)
-        
+
         if fecha_inicio:
             query = query.gte("fecha", fecha_inicio)
         if fecha_fin:
             query = query.lte("fecha", fecha_fin)
-        
+
         result = query.execute()
         return result.data
     except Exception as e:
@@ -398,7 +419,7 @@ def registrar_menudo(menudo: MenudoCreate):
         result = supabase.table("menudo_registros").insert({
             "cajero_id": menudo.cajero_id,
             "monto": menudo.monto,
-            "fecha": fecha_colombia_hoy(),  # ✅ Fecha Colombia
+            "fecha": fecha_colombia_hoy(),
             "registrado_por": menudo.registrado_por,
             "observaciones": menudo.observaciones
         }).execute()
@@ -430,7 +451,7 @@ def obtener_base_del_dia(cajero_id: int):
         if ultimo_cuadre.data:
             base_inicial = float(ultimo_cuadre.data[0].get("base") or 0)
 
-        hoy = fecha_colombia_hoy()  # ✅ Fecha Colombia
+        hoy = fecha_colombia_hoy()
         menudo_hoy_result = supabase.table("menudo_registros") \
             .select("monto") \
             .eq("cajero_id", cajero_id) \
